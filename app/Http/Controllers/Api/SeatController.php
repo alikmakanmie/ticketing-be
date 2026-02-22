@@ -74,43 +74,48 @@ class SeatController extends Controller
      */
     public function lockSeat(Request $request, $sessionId)
     {
-        // 1. Validasi Input (Asumsi user sudah login dan mengirim token)
+        // 1. Validasi Input (Support array seat_ids dari frontend)
         $request->validate([
-            'seat_id' => 'required|exists:seats,id',
+            'seat_ids' => 'required|array',
+            'seat_ids.*' => 'exists:seats,id',
         ]);
 
-        $user = auth()->user();
+        // Fallback user ID 1 (Karena anda belum implementasi Login di Frontend)
+        $userId = auth()->user() ? auth()->user()->id : 1;
 
         // 2. Transaction mencegah Race Condition (Locking Pessimistic - lockForUpdate).
         try {
             DB::beginTransaction();
 
-            // PENTING: .lockForUpdate() akan menge-lock baris ini di Database Level (InnoDB)
-            // Selama transaksi ini belum commit, user lain yang request kursi ini
-            // akan tertahan (wait) sampai ini selesai (maksimal berapa detik ter-config di db).
-            $seat = Seat::where('id', $request->seat_id)
-                ->where('session_id', $sessionId)
-                ->lockForUpdate()
-                ->firstOrFail();
+            // Looping seluruh seat_ids untuk mencegah race condition
+            $lockedSeats = [];
+            foreach ($request->seat_ids as $seatId) {
+                $seat = Seat::where('id', $seatId)
+                    ->where('session_id', $sessionId)
+                    ->lockForUpdate()
+                    ->firstOrFail();
 
-            // 3. Pengecekan status akhir secara akurat (apakah beneran kosong)
-            if (!$seat->isAvailable()) {
-                DB::rollBack();
-                // Jika gagal (kalah cepat dengan user lain)
-                // Di Frontend: Akan me-refresh denah seat map
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Maaf, kursi baru saja diambil orang lain.',
-                    'error' => 'seat_unavailable'
-                ], 409); // 409 Conflict
+                // 3. Pengecekan status akhir secara akurat (apakah beneran kosong)
+                if (!$seat->isAvailable()) {
+                    DB::rollBack();
+                    return response()->json([
+                        'success' => false,
+                        'message' => "Maaf, kursi {$seat->seat_code} baru saja diambil orang lain.",
+                        'error' => 'seat_unavailable'
+                    ], 409); // 409 Conflict
+                }
+
+                // Masukkan ke array batch update
+                $lockedSeats[] = $seat;
             }
 
-            // 4. Sukses: Backend mengubah status kursi jadi 'Locked'
-            // dan mengatur batas waku jadi +15 menit ke depan.
-            $seat->status = Seat::STATUS_LOCKED;
-            $seat->locked_by = $user->id;
-            $seat->locked_until = Carbon::now()->addMinutes(15);
-            $seat->save();
+            // 4. Sukses: Backend mengubah status kursi jadi 'Locked' 
+            foreach ($lockedSeats as $seatToLock) {
+                $seatToLock->status = Seat::STATUS_LOCKED;
+                $seatToLock->locked_by = $userId;
+                $seatToLock->locked_until = Carbon::now()->addMinutes(15);
+                $seatToLock->save();
+            }
 
             DB::commit();
 
@@ -118,9 +123,8 @@ class SeatController extends Controller
                 'success' => true,
                 'message' => 'Kursi berhasil dikunci. Anda memiliki waktu 15 Menit untuk Checkout.',
                 'data' => [
-                    'seat_code' => $seat->seat_code,
-                    'locked_until' => $seat->locked_until,
-                    // Frontend akan menampilkan countdown timer dari 'locked_until' mengurangi jam sekarang
+                    'locked_seats_count' => count($lockedSeats),
+                    'locked_until' => Carbon::now()->addMinutes(15)->toIso8601String(),
                 ]
             ]);
 

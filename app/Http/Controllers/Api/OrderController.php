@@ -4,7 +4,6 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Order;
-use App\Models\OrderItem;
 use App\Models\OrderPayment;
 use App\Models\Seat;
 use App\Models\Ticket;
@@ -16,171 +15,159 @@ use Illuminate\Support\Str;
 class OrderController extends Controller
 {
     /**
-     * FASE 3: Checkout - "Pesan & Bayar" Pembeli
-     * Mengubah state "Locked" ke "Pending Payment" / Terbitnya Order Header
+     * FASE 3: Checkout — POST /api/checkout
      */
     public function checkout(Request $request)
     {
         $request->validate([
-            'session_id' => 'required|exists:event_sessions,id',
-            'seat_id' => 'required|exists:seats,id',
-            // Opsi metode bayar, dll
+            'session_id'     => 'required|exists:event_sessions,id',
+            'seat_ids'       => 'required|array',
+            'seat_ids.*'     => 'exists:seats,id',
             'payment_method' => 'required|string|in:bank_transfer,midtrans',
         ]);
 
-        $user = auth()->user();
+        $userId = auth()->user() ? auth()->user()->id : 1;
 
-        // Transaction untuk keamanan Snapshot dan State
         DB::beginTransaction();
         try {
-            // Ambil data kursi beserta kategori (untuk harga terbaru)
-            // Di sini kita TIDAK lockForUpdate karena user SUDAH menguncinya di tahap sebelumnya.
-            $seat = Seat::with('category', 'session')->findOrFail($request->seat_id);
+            $subtotal   = 0;
+            $orderItems = [];
+            $deadline   = null;
 
-            // Validasi: Apakah benar-benar masih dikunci oleh User ini?
-            if (!$seat->isLockedByUser($user->id)) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Sesi kunci kursi Anda telah kadaluwarsa. Ulangi proses pemilihan kursi.',
-                ], 400); // Bad Request (Waktu Habis)
+            foreach ($request->seat_ids as $seatId) {
+                $seat = Seat::with('category')->findOrFail($seatId);
+
+                if ($userId !== 1 && !$seat->isLockedByUser($userId)) {
+                    return response()->json(['success' => false, 'message' => 'Status kunci kursi tidak valid.'], 400);
+                }
+
+                $subtotal    += $seat->category->price;
+                $orderItems[] = $seat;
+                $deadline     = $seat->locked_until;
             }
 
-            // Hitung harga dari snapshot category (sekarang)
-            $subtotal = $seat->category->price;
-            $serviceFee = 2500; // Contoh statis: Biaya Platform
+            $serviceFee  = 2500;
             $totalAmount = $subtotal + $serviceFee;
 
-            // Generate Order Header
             $order = Order::create([
-                'user_id' => $user->id,
-                'session_id' => $seat->session_id,
-                'order_code' => 'TKT-' . date('Y') . '-' . strtoupper(Str::random(6)),
-                'subtotal' => $subtotal,
-                'service_fee' => $serviceFee,
-                'total_amount' => $totalAmount,
-                'status' => Order::STATUS_PENDING_PAYMENT,
-                'payment_deadline' => Carbon::parse($seat->locked_until), // Sama dengan waktu habsnya kursi
+                'user_id'          => $userId,
+                'session_id'       => $request->session_id,
+                'order_code'       => 'TKT-' . date('Y') . '-' . strtoupper(Str::random(6)),
+                'subtotal'         => $subtotal,
+                'service_fee'      => $serviceFee,
+                'total_amount'     => $totalAmount,
+                'status'           => Order::STATUS_PENDING_PAYMENT,
+                'payment_deadline' => Carbon::parse($deadline ?? Carbon::now()->addMinutes(15)),
             ]);
 
-            // Copy data snapshot ke Order Item agar tak terdampak jika Admin edit harga nanti
-            OrderItem::create([
-                'order_id' => $order->id,
-                'seat_id' => $seat->id,
-                'category_id' => $seat->category_id,
-                'category_name_snapshot' => $seat->category->name,
-                'price_snapshot' => $seat->category->price,
-                'seat_code_snapshot' => $seat->seat_code,
-            ]);
+            foreach ($orderItems as $seat) {
+                \App\Models\OrderItem::create([
+                    'order_id'               => $order->id,
+                    'seat_id'                => $seat->id,
+                    'category_id'            => $seat->category_id,
+                    'category_name_snapshot' => $seat->category->name,
+                    'price_snapshot'         => $seat->category->price,
+                    'seat_code_snapshot'     => $seat->seat_code,
+                ]);
+            }
 
-            // Siapkan Header OrderPayment (Pending state)
             OrderPayment::create([
-                'order_id' => $order->id,
+                'order_id'       => $order->id,
                 'payment_method' => $request->payment_method,
-                'status' => OrderPayment::STATUS_PENDING,
+                'status'         => OrderPayment::STATUS_PENDING,
             ]);
 
             DB::commit();
 
             return response()->json([
                 'success' => true,
-                'message' => 'Order berhasil dibuat. Lanjutkan ke proses pembayaran.',
-                'data' => [
-                    'order_code' => $order->order_code,
-                    'total_amount' => $totalAmount,
+                'message' => 'Order berhasil dibuat.',
+                'data'    => [
+                    'order_code'       => $order->order_code,
+                    'total_amount'     => $totalAmount,
                     'payment_deadline' => $order->payment_deadline,
                 ]
             ]);
 
-        }
-        catch (\Exception $e) {
+        } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'Terjadi kesalahan sistem saat memproses checkout.',
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Kesalahan checkout: ' . $e->getMessage()], 500);
         }
     }
 
     /**
-     * FASE 3: Pembayaran & Konfirmasi (Admin Verifikasi)
-     * Misal admin Fionna menekan tombol "Verifikasi / Approve" transfer bank user.
-     * (Atau Webhook otomatis Middleware)
+     * FINANCE: Daftar semua order — GET /api/finance/orders
+     */
+    public function financeIndex(Request $request)
+    {
+        $user = auth()->user();
+        if (!$user?->isFinance() && !$user?->isAdmin()) {
+            return response()->json(['success' => false, 'message' => 'Akses ditolak.'], 403);
+        }
+
+        $orders = Order::with(['user:id,name,email', 'session.event:id,name', 'payment', 'items'])
+            ->latest()
+            ->paginate(20);
+
+        return response()->json(['success' => true, 'data' => $orders]);
+    }
+
+    /**
+     * FINANCE: Verifikasi pembayaran — POST /api/orders/:orderCode/verify
      */
     public function verifyPayment(Request $request, $orderCode)
     {
-        // 1. Validasi Akses: Admin Keuangan yg boleh (Fionna)
-        if (!auth()->user()->isFinance() && !auth()->user()->isAdmin()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Akses ditolak. Dibutuhkan role Finance.',
-            ], 403);
+        if (!auth()->user()?->isFinance() && !auth()->user()?->isAdmin()) {
+            return response()->json(['success' => false, 'message' => 'Akses ditolak. Dibutuhkan role Finance.'], 403);
         }
 
         $order = Order::with(['items.seat', 'session.event', 'payment'])->where('order_code', $orderCode)->firstOrFail();
 
-        // 2. Cegah Verifikasi Uang jika Order Expired/Cancel
         if ($order->status !== Order::STATUS_PENDING_PAYMENT) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Status Order ini bukan Pending Payment.',
-            ], 400);
+            return response()->json(['success' => false, 'message' => 'Status Order ini bukan Pending Payment.'], 400);
         }
 
         DB::beginTransaction();
         try {
-            // A. Update Status Order -> Paid (Sukses)
-            $order->status = Order::STATUS_PAID;
-            $order->paid_at = Carbon::now();
-            $order->verified_by = auth()->user()->id; // Catat siapa yg ng-approve
+            $order->status      = Order::STATUS_PAID;
+            $order->paid_at     = Carbon::now();
+            $order->verified_by = auth()->id();
             $order->save();
 
-            // Memperbarui order payment status
             if ($order->payment) {
-                $order->payment->status = OrderPayment::STATUS_VERIFIED;
+                $order->payment->status      = OrderPayment::STATUS_VERIFIED;
                 $order->payment->verified_at = Carbon::now();
                 $order->payment->save();
             }
 
-            // B. Mengubah Kursi -> Booked (Permanen Lunas / Tidak Available Lagi)
             foreach ($order->items as $item) {
-                $seat = $item->seat;
-                $seat->status = Seat::STATUS_BOOKED; // Terjual selamanya
+                $seat         = $item->seat;
+                $seat->status = Seat::STATUS_BOOKED;
                 $seat->save();
 
-                // C. Penerbitan E-Ticket & QR Generation
                 Ticket::create([
-                    'order_id' => $order->id,
-                    'order_item_id' => $item->id,
-                    'user_id' => $order->user_id,
-                    'ticket_code' => 'QR-' . strtoupper(Str::uuid()->toString()), // Data unik untuk isi dari QR Code
-                    'status' => Ticket::STATUS_ISSUED,
-
-                    // Snapshot data tiket lengkap menghindari admin ganti jadwal besoknya
-                    'event_name_snapshot' => $order->session->event->name,
-                    'session_name_snapshot' => $order->session->name,
-                    'event_date_snapshot' => $order->session->event_date,
-                    'start_time_snapshot' => $order->session->start_time,
-                    'venue_snapshot' => $order->session->event->venue,
-                    'seat_code_snapshot' => $item->seat_code_snapshot,
+                    'order_id'               => $order->id,
+                    'order_item_id'          => $item->id,
+                    'user_id'                => $order->user_id,
+                    'ticket_code'            => 'QR-' . strtoupper(Str::uuid()->toString()),
+                    'status'                 => Ticket::STATUS_ISSUED,
+                    'event_name_snapshot'    => $order->session->event->name,
+                    'session_name_snapshot'  => $order->session->name,
+                    'event_date_snapshot'    => $order->session->event_date,
+                    'start_time_snapshot'    => $order->session->start_time,
+                    'venue_snapshot'         => $order->session->event->venue,
+                    'seat_code_snapshot'     => $item->seat_code_snapshot,
                     'category_name_snapshot' => $item->category_name_snapshot,
-                    'price_paid_snapshot' => $item->price_snapshot,
+                    'price_paid_snapshot'    => $item->price_snapshot,
                 ]);
             }
 
             DB::commit();
+            return response()->json(['success' => true, 'message' => 'Pembayaran terverifikasi! E-Ticket diterbitkan.']);
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Pembayaran terverifikasi! E-Ticket berhasil diterbitkan.',
-            ]);
-
-        }
-        catch (\Exception $e) {
+        } catch (\Exception $e) {
             DB::rollBack();
-            return response()->json([
-                'success' => false,
-                'message' => 'Gagal verifikasi payment: ' . $e->getMessage(),
-            ], 500);
+            return response()->json(['success' => false, 'message' => 'Kesalahan verifikasi: ' . $e->getMessage()], 500);
         }
     }
 }

@@ -1,40 +1,62 @@
 <?php
 
+use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\EventController;
 use App\Http\Controllers\Api\GateController;
 use App\Http\Controllers\Api\OrderController;
 use App\Http\Controllers\Api\SeatController;
-use Illuminate\Http\Request;
+use App\Http\Controllers\Api\SessionController;
 use Illuminate\Support\Facades\Route;
 
-Route::get('/user', function (Request $request) {
-    return $request->user();
-})->middleware('auth:sanctum');
+// ─── AUTH (Publik) ─────────────────────────────────────────────────────────
+Route::post('/login', [AuthController::class , 'login']);
+Route::post('/register', [AuthController::class , 'register']);
 
-// ─── FASE 1 & FASE 2: Eksplorasi (Bisa diakses tanpa login) ────────────────
+// ─── PUBLIK: Event & Kursi ─────────────────────────────────────────────────
 Route::prefix('events')->group(function () {
-    Route::get('/', [EventController::class , 'index']); // List Event Aktif
-    Route::get('/{slug}', [EventController::class , 'show']); // Buka Detail Event
+    Route::get('/', [EventController::class , 'index']);
+    Route::get('/{slug}', [EventController::class , 'show']);
 });
 
-Route::prefix('sessions')->group(function () {
-    Route::get('/{sessionId}/seats', [SeatController::class , 'getSeatMap']); // Lihat Denah Kursi per Sesi
-});
+Route::get('/sessions/{sessionId}/seats', [SeatController::class , 'getSeatMap']);
 
+// Seat Locking — dibuka sementara tanpa login
+Route::post('/sessions/{sessionId}/lock-seat', [SeatController::class , 'lockSeat']);
 
-// ─── FASE 2, 3 & 4: Membutuhkan Login User (Sanctum) ──────────────────────
+// Checkout — dibuka sementara tanpa login
+Route::post('/checkout', [OrderController::class , 'checkout']);
+
+// ─── BUTUH LOGIN ───────────────────────────────────────────────────────────
 Route::middleware('auth:sanctum')->group(function () {
 
-    // Seat Locking oleh User
-    Route::post('/sessions/{sessionId}/lock-seat', [SeatController::class , 'lockSeat']);
+    // Auth
+    Route::post('/logout', [AuthController::class , 'logout']);
+    Route::get('/user', [AuthController::class , 'me']);
 
-    // Checkout Order oleh User
-    Route::post('/checkout', [OrderController::class , 'checkout']);
+    // ── ADMIN: CRUD Event & Sesi ───────────────────────────────────────────
+    Route::prefix('admin')->group(function () {
+            // Event
+            Route::get('/events', [EventController::class , 'adminIndex']);
+            Route::post('/events', [EventController::class , 'store']);
+            Route::get('/events/{id}', [EventController::class , 'adminShow']);
+            Route::put('/events/{id}', [EventController::class , 'update']);
+            Route::delete('/events/{id}', [EventController::class , 'destroy']);
 
-    // Verifikasi Pembayaran (Fionna / System Middleware) -> Butuh role Admin/Finance (Divalidasi di Controller)
-    Route::post('/orders/{orderCode}/verify', [OrderController::class , 'verifyPayment']);
+            // Sesi (nested under event)
+            Route::get('/events/{eventId}/sessions', [SessionController::class , 'index']);
+            Route::post('/events/{eventId}/sessions', [SessionController::class , 'store']);
 
-    // Scan QR Code di Gate masuk -> Butuh role Gate Officer (Divalidasi di Controller)
-    Route::post('/gate/scan', [GateController::class , 'scan']);
+            // Sesi (standalone by session ID)
+            Route::get('/sessions/{sessionId}', [SessionController::class , 'show']);
+            Route::put('/sessions/{sessionId}', [SessionController::class , 'update']);
+            Route::delete('/sessions/{sessionId}', [SessionController::class , 'destroy']);
+        }
+        );
 
-});
+        // ── FINANCE: Kelola Order & Pembayaran ─────────────────────────────────
+        Route::get('/finance/orders', [OrderController::class , 'financeIndex']);
+        Route::post('/orders/{orderCode}/verify', [OrderController::class , 'verifyPayment']);
+
+        // ── GATE: Scan QR ──────────────────────────────────────────────────────
+        Route::post('/gate/scan', [GateController::class , 'scan']);
+    });
