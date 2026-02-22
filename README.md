@@ -1,81 +1,223 @@
-# Backend Tiket.in - E-Ticketing System
+# 🎟️ TiketIn — Backend (Laravel)
 
-Sistem Backend untuk aplikasi pemesanan tiket event/konser, dibangun menggunakan framework **Laravel 11** dan **SQLite**. Proyek ini mendemonstrasikan penanganan inti dari *Business Logic* ticketing, mulai dari eksplorasi event, pemilihan kursi, manajemen Checkout, pembayaran, hingga QR Code Check-in di *Venue Gate*.
-
-## 🌟 Fitur Utama (Core Features)
-
-1.  **State Machine Kursi (Seat Management):** Kursi memiliki 4 status akurat (`available`, `locked`, `booked`, `used`).
-2.  **Mitigasi Race Condition (Pessimistic Locking):** Menggunakan fitur `DB::lockForUpdate()` untuk mengamankan kursi (*lock*) saat ada beberapa *user* mencoba membeli satu kursi yang sama pada waktu sepersekian detik yang bersamaan.
-3.  **Audit Trail & Anti-Fraud Scanner:** Sistem gate scanner yang divalidasi dengan tabel Riwayat Scan `scan_logs` untuk mencegah penggunaan satu tiket oleh *calo* atau *screenshot* tiket berulang kali.
-4.  **Sistem Snapshot Harga:** Sistem tiket statis; harga tiket yang dibeli (*snapshot*) disalin ke data Order dan E-Ticket `tickets` untuk menjaga konsistensi laporan akuntansi meskipun admin mengganti harga kategori asilnya di masa depan.
-5.  **Task Scheduler Latar Belakang:** Dilengkapi program pembersihan otomatis (`php artisan schedule:run`) yang berjalan tiap menit untuk merilis kembali daftar kursi `locked`/`pending_payment` yang melewati batas waktu pembayaran 15 menit.
-
-## 🚀 Instalasi & Cara Menjalankan (Local Development)
-
-### Persyaratan Sistem
-*   PHP 8.2 atau lebih baru
-*   Ekstensi PHP: `pdo`, `sqlite3` (Untuk Linux: `sudo dnf install php-pdo php-sqlite3`)
-*   Composer
-
-### Langkah-langkah
-1.  **Clone / Download Repository ini**
-2.  **Install Dependensi Composer**
-    ```bash
-    composer install
-    ```
-3.  **Copy Environment Variables**
-    ```bash
-    cp .env.example .env
-    ```
-4.  **Generate App Key**
-    ```bash
-    php artisan key:generate
-    ```
-5.  **Siapkan Database & Jalankan Migrasi + Seeder**
-    Pastikan file `database/database.sqlite` sudah ada (atau kosongkan isinya).
-    ```bash
-    touch database/database.sqlite
-    php artisan migrate:fresh --seed
-    ```
-6.  **Jalankan Server Laravel**
-    ```bash
-    php artisan serve
-    ```
-7.  **Jalankan Background Task Scheduler (Dibutuhkan untuk expire seat otomatis)**
-    Buka tab/terminal baru dan jalankan:
-    ```bash
-    php artisan schedule:work
-    ```
-
-## 📊 Akun Login Dummy (Hasil Seeder)
-
-Password untuk **semua akun** di bawah ini adalah: `password`
-
-| Nama | Email | Role |
-| :--- | :--- | :--- |
-| **Super Admin** | `admin@tiket.in` | `admin` |
-| **Fionna Finance** | `finance@tiket.in` | `finance` |
-| **Budi Gate Officer** | `gate@tiket.in` | `gate_officer` |
-| **Andi Pembeli** | `buyer@tiket.in` | `buyer` |
-
-Ketika project pertama kali di-seed, *Database* akan otomatis men-generate **1 buah Event ("Kancah Seni 2026")**, **3 Sesi (Malam 1-3)**,  **300 Kursi (VIP & Reguler)** per sesi, serta **Transaksi Dummy (4 Kursi terkunci, 6 Terbeli Lunas)** di Sesi Malam 1 agar Frontend bisa melihat variasi grid denah tempat duduk secara instan.
-
-## 📡 Daftar API Endpoints Utama
-
-Seluruh endpoint diawali dengan base URL: `http://localhost:8000/api`
-
-### A. Public Routes (Tanpa Auth)
-*   `GET /events` - Mendapatkan daftar acara keseluruhan
-*   `GET /events/{slug}` - Mendapatkan detail satu acara beserta daftar sesi (mendapatkan `sessionId`)
-*   `GET /sessions/{sessionId}/seats` - Mengambil Denah Pemetaan Kursi dan statusnya secara akurat
-
-### B. Transaksi Pembeli (Header: `Authorization: Bearer <token_buyer>`)
-*   `POST /sessions/{sessionId}/lock-seat` - Mengunci kursi dari pembeli lain *(Body: `seat_id`)*
-*   `POST /checkout` - Konfirmasi nominal Checkout dan metode bayar *(Body: `session_id`, `seat_id`, `payment_method`)*
-
-### C. Admin & Gate (Header: `Authorization: Bearer <token_admin/gate>`)
-*   `POST /orders/{orderCode}/verify` - (Finance) Verifikasi pembayaran manual untuk mengubah Seat & Menerbitkan E-Ticket.
-*   `POST /gate/scan` - (Gate Officer) Membaca QR Code untuk merekam jejak Check-in masuk gerbang *(Body: `qr_code`, `device_id`)*.
+REST API backend untuk sistem pembelian tiket event, dibangun dengan **Laravel 11 + Sanctum** untuk autentikasi berbasis token.
 
 ---
-*Dikembangkan dengan ❤️ untuk Project E-Ticketing*
+
+## 🖥️ Tech Stack
+
+| Teknologi | Versi |
+|---|---|
+| PHP | 8.2+ |
+| Laravel | 11+ |
+| Laravel Sanctum | 4+ |
+| MySQL / SQLite | — |
+
+---
+
+## ✨ Fitur API
+
+| Fitur | Endpoint |
+|---|---|
+| Autentikasi (Login/Register/Logout) | `/api/login`, `/api/register`, `/api/logout` |
+| Daftar & Detail Event | `GET /api/events`, `GET /api/events/:slug` |
+| Denah Kursi per Sesi | `GET /api/sessions/:id/seats` |
+| Kunci Kursi | `POST /api/sessions/:id/lock-seat` |
+| Checkout | `POST /api/checkout` |
+| CRUD Event (Admin) | `/api/admin/events` |
+| CRUD Sesi (Admin) | `/api/admin/events/:id/sessions` |
+| Daftar Order (Finance) | `GET /api/finance/orders` |
+| Verifikasi Pembayaran (Finance) | `POST /api/orders/:code/verify` |
+| Scan QR Gate | `POST /api/gate/scan` |
+
+---
+
+## 🗂️ Struktur Penting
+
+```
+app/
+├── Http/Controllers/Api/
+│   ├── AuthController.php      # Login, Register, Logout, Me
+│   ├── EventController.php     # Publik & Admin CRUD Event
+│   ├── SessionController.php   # Admin CRUD Sesi
+│   ├── SeatController.php      # Denah kursi & lock seat
+│   ├── OrderController.php     # Checkout, Finance order list, Verify
+│   └── GateController.php      # Scan QR gate
+├── Models/
+│   ├── User.php
+│   ├── Event.php
+│   ├── EventSession.php
+│   ├── Seat.php
+│   ├── TicketCategory.php
+│   ├── Order.php
+│   ├── OrderItem.php
+│   ├── OrderPayment.php
+│   └── Ticket.php
+routes/
+└── api.php                     # Semua route API
+config/
+└── cors.php                    # Konfigurasi CORS untuk frontend
+database/
+└── seeders/DatabaseSeeder.php  # Data dummy lengkap
+```
+
+---
+
+## 🚀 Cara Menjalankan
+
+### 1. Clone & Install
+
+```bash
+git clone https://github.com/alikmakanmie/laraveltiketin.git
+cd laraveltiketin
+composer install
+```
+
+### 2. Konfigurasi Environment
+
+```bash
+cp .env.example .env
+php artisan key:generate
+```
+
+Edit `.env`:
+
+```env
+DB_CONNECTION=mysql
+DB_HOST=127.0.0.1
+DB_PORT=3306
+DB_DATABASE=laraveltiketin
+DB_USERNAME=root
+DB_PASSWORD=
+
+# Sanctum
+SANCTUM_STATEFUL_DOMAINS=localhost:5173
+SESSION_DOMAIN=localhost
+```
+
+### 3. Migrasi & Seeder
+
+```bash
+php artisan migrate --seed
+```
+
+### 4. Jalankan Server
+
+```bash
+php artisan serve
+```
+
+API akan berjalan di: **http://localhost:8000**
+
+---
+
+## 🔒 Autentikasi
+
+Menggunakan **Laravel Sanctum** dengan token Bearer.
+
+```http
+Authorization: Bearer {token}
+```
+
+Token diperoleh setelah login/register via `POST /api/login`.
+
+---
+
+## 👥 Role Pengguna
+
+| Role | Akses |
+|---|---|
+| `buyer` | Lihat event, pilih kursi, checkout |
+| `admin` | CRUD event & sesi |
+| `finance` | Lihat order, verifikasi pembayaran |
+| `gate_officer` | Scan QR tiket masuk |
+
+### Akun Demo (dari seeder)
+
+| Email | Password | Role |
+|---|---|---|
+| `admin@tiket.in` | `password` | admin |
+| `finance@tiket.in` | `password` | finance |
+| `gate@tiket.in` | `password` | gate_officer |
+| `budi@example.com` | `password` | buyer |
+
+---
+
+## 🌐 CORS
+
+Frontend yang diizinkan sudah dikonfigurasi di `config/cors.php`:
+
+```php
+'allowed_origins' => [
+    'http://localhost:5173',
+    'http://127.0.0.1:5173',
+],
+```
+
+---
+
+## 📋 API Reference
+
+### Auth
+
+| Method | Endpoint | Auth | Deskripsi |
+|---|---|---|---|
+| POST | `/api/login` | ❌ | Login, kembalikan token |
+| POST | `/api/register` | ❌ | Registrasi user baru |
+| POST | `/api/logout` | ✅ | Hapus token sesi |
+| GET | `/api/user` | ✅ | Info user yang sedang login |
+
+### Event (Publik)
+
+| Method | Endpoint | Deskripsi |
+|---|---|---|
+| GET | `/api/events` | Daftar event published |
+| GET | `/api/events/:slug` | Detail event + sesi |
+
+### Kursi & Pemesanan
+
+| Method | Endpoint | Auth | Deskripsi |
+|---|---|---|---|
+| GET | `/api/sessions/:id/seats` | ❌ | Denah kursi sesi |
+| POST | `/api/sessions/:id/lock-seat` | ❌ | Kunci kursi sementara |
+| POST | `/api/checkout` | ❌ | Buat order |
+
+### Admin — Event & Sesi
+
+| Method | Endpoint | Deskripsi |
+|---|---|---|
+| GET | `/api/admin/events` | Semua event |
+| POST | `/api/admin/events` | Buat event |
+| GET | `/api/admin/events/:id` | Detail event |
+| PUT | `/api/admin/events/:id` | Update event |
+| DELETE | `/api/admin/events/:id` | Hapus event |
+| GET | `/api/admin/events/:id/sessions` | Daftar sesi |
+| POST | `/api/admin/events/:id/sessions` | Buat sesi |
+| GET | `/api/admin/sessions/:id` | Detail sesi |
+| PUT | `/api/admin/sessions/:id` | Update sesi |
+| DELETE | `/api/admin/sessions/:id` | Hapus sesi |
+
+### Finance
+
+| Method | Endpoint | Deskripsi |
+|---|---|---|
+| GET | `/api/finance/orders` | Daftar order (paginated) |
+| POST | `/api/orders/:code/verify` | Verifikasi pembayaran |
+
+### Gate
+
+| Method | Endpoint | Deskripsi |
+|---|---|---|
+| POST | `/api/gate/scan` | Scan & validasi QR tiket |
+
+---
+
+## 🔗 Frontend
+
+Repo frontend: [alikmakanmie/ticketing-fe](https://github.com/alikmakanmie/ticketing-fe)
+
+---
+
+## 📄 Lisensi
+
+MIT License © 2026 alikmakanmie
